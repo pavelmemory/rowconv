@@ -6,12 +6,20 @@ import (
 	"testing"
 
 	"context"
-	_ "github.com/go-sql-driver/mysql"
 	"time"
 	"reflect"
 )
 
 var db *sql.DB
+
+const (
+	port = "32100"
+	user = "user"
+	password = "password"
+	schema = "dev"
+	postgres = "postgres"
+	mysql = "mysql"
+)
 
 func TestMain(t *testing.M) {
 	setup()
@@ -29,11 +37,17 @@ func setup() {
 }
 
 func initDbConnection() {
-	mySQL, err := sql.Open("mysql", "root:root@/Development?parseTime=true")
+	var err error
+	db, err = sql.Open(driverName(), dataSourceURL())
 	if err != nil {
 		panic(err)
 	}
-	db = mySQL
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), time.Second)
+	defer pingCancel()
+	err = db.PingContext(pingCtx)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func closeDbConnection() {
@@ -114,7 +128,7 @@ func TestPropagate(t *testing.T) {
 
 					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
 					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT col2 FROM propagation ORDER BY id")
+					rows, err := tx.QueryContext(runCtx, "SELECT col2 FROM propagation ORDER BY id ASC ")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -123,8 +137,11 @@ func TestPropagate(t *testing.T) {
 					if err := Propagate(&col2s, rows); err != nil {
 						t.Fatal(err)
 					}
-					if col2s[0] != nil || *col2s[1] != "b" {
-						t.Errorf("unexpeted results of propagation: %v", col2s)
+					if col2s[0] != nil {
+						t.Errorf("unexpeted results of propagation: %+v", col2s[0])
+					}
+					if *col2s[1] != "b" {
+						t.Errorf("unexpeted results of propagation: %+v", *col2s[1])
 					}
 				}
 			},
@@ -239,6 +256,10 @@ func TestPropagate(t *testing.T) {
 			scenario: "retrieve multiple columns and store into a slice of value struct type with embedded field of simple type",
 			action: func(tx *sql.Tx) func(t *testing.T) {
 				return func(t *testing.T) {
+					if driverName() == postgres {
+						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: "+
+							"sql: Scan error on column index 1: unsupported Scan, storing driver.Value type string into type *main.Col1")
+					}
 					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
 					defer initCancel()
 					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')")
@@ -274,6 +295,10 @@ func TestPropagate(t *testing.T) {
 			scenario: "retrieve multiple columns and store into a slice of value struct type with embedded field of struct value type",
 			action: func(tx *sql.Tx) func(t *testing.T) {
 				return func(t *testing.T) {
+					if driverName() == postgres {
+						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: "+
+							"sql: Scan error on column index 1: unsupported Scan, storing driver.Value type string into type *main.Col1")
+					}
 					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
 					defer initCancel()
 					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'c')")
@@ -453,13 +478,7 @@ func TestPropagate(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err = tx.ExecContext(txCtx, `
-CREATE TEMPORARY TABLE IF NOT EXISTS propagation(
-	id DECIMAL(6,0) PRIMARY KEY,
-	col1 VARCHAR(20) NOT NULL,
-	col2 CHAR(10),
-	col3 DATETIME
-) ENGINE = InnoDB, DEFAULT CHARACTER SET = utf8mb4`)
+		_, err = tx.ExecContext(txCtx, ddlCreateTestTempTable())
 		if err != nil {
 			t.Fatal(err)
 		}
