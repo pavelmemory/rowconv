@@ -26,23 +26,23 @@ var (
 	strictColumnAmountCheck bool
 )
 
-// SetStrictColumnTypeCheck configures mapper to check types of struct fields with types returned by database driver
+// StrictColumnTypeCheck configures mapper to check types of struct fields with types returned by database driver
 // if types are different and 'strict' set to 'true' the error will be produced
-func SetStrictColumnTypeCheck(strict bool) {
+func StrictColumnTypeCheck(strict bool) {
 	strictColumnTypeCheck = strict
 }
 
-// SetStrictColumnAmountCheck configures mapper to check amount of struct fields to be exact to amount of columns returned
+// StrictColumnAmountCheck configures mapper to check amount of struct fields to be exact to amount of columns returned
 // if amount is different and 'strict' set to 'true' the error will be produced
-func SetStrictColumnAmountCheck(strict bool) {
+func StrictColumnAmountCheck(strict bool) {
 	strictColumnAmountCheck = strict
 }
 
 var (
-	smallestStructDecompositions map[reflect.Type]struct{} = func() map[reflect.Type]struct{} {
+	smallestStructDecompositions = func() map[reflect.Type]struct{} {
 		return map[reflect.Type]struct{}{
-			reflect.TypeOf(time.Time{}):     struct{}{},
-			reflect.TypeOf(time.Location{}): struct{}{},
+			reflect.TypeOf(time.Time{}):     {},
+			reflect.TypeOf(time.Location{}): {},
 		}
 	}()
 	smallestStructDecompositionsMtx sync.RWMutex
@@ -50,6 +50,7 @@ var (
 
 // SmallestStructDecomposition adds struct to set of structs that not need to be field-initialized,
 // such as time.Time and time.Location
+// `time.Time` and `time.Location` are added by default
 func SmallestStructDecomposition(t reflect.Type) {
 	smallestStructDecompositionsMtx.Lock()
 	smallestStructDecompositions[t] = struct{}{}
@@ -261,53 +262,6 @@ func getStructProvider(forType reflect.Type) (structProvider, error) {
 	return provider, nil
 }
 
-// this func creates new struct by traversing it's structure with reflection
-// and initializes struct fields
-//func newStructRecursively(dst reflect.Type) (reflect.Value, error) {
-//	dstActual, wrapLevels, err := unwrapPtrStructType(dst)
-//	if err != nil {
-//		return reflect.Value{}, err
-//	}
-//
-//	holderValue := reflect.New(dstActual).Elem()
-//	if err := initFieldsRecursively(holderValue); err != nil {
-//		return reflect.Value{}, err
-//	}
-//	for i := wrapLevels; i > 0; i-- {
-//		holderValue = holderValue.Addr()
-//	}
-//	return holderValue, nil
-//}
-//
-//func initFieldsRecursively(holderValue reflect.Value) error {
-//	for i := 0; i < holderValue.NumField(); i++ {
-//		holderField := holderValue.Field(i)
-//		switch holderField.Kind() {
-//		case  reflect.Struct:
-//			if err := initFieldsRecursively(holderField); err != nil {
-//				return err
-//			}
-//		case reflect.Ptr:
-//			// create pointer before accessing its type information
-//			holderFieldPtr := reflect.New(holderField.Type().Elem())
-//			holderFieldElem := holderFieldPtr.Elem()
-//			if holderFieldElem.Kind() == reflect.Struct {
-//				if isSmallestStructDecomposition(holderFieldElem.Type()) {
-//					continue
-//				}
-//				holderFieldValue, err := newStructRecursively(holderField.Type())
-//				if err != nil {
-//					return err
-//				}
-//				holderField.Set(holderFieldValue)
-//			}
-//		default:
-//		// field of base type/reference or alias to base type/reference that not need to be initialized
-//		}
-//	}
-//	return nil
-//}
-
 func unwrapPtrStructType(wrapped reflect.Type) (reflect.Type, int, error) {
 	actualType := wrapped
 	levels := 0
@@ -363,17 +317,18 @@ func isSingleBasicType(dstType reflect.Type) bool {
 
 func singleColumnMapper(forType reflect.Type) func(dst interface{}, rows *sql.Rows) error {
 	return func(holder interface{}, rows *sql.Rows) error {
+		inject, err := prepareInjector(holder)
+		if err != nil {
+			rows.Close()
+			return err
+		}
 		for rows.Next() {
 			holderElement := reflect.New(forType)
 			err := rows.Scan(holderElement.Interface())
 			if err != nil {
 				return err
 			}
-			err = putToHolder(holder, holderElement.Elem())
-			if err != nil {
-				rows.Close()
-				return err
-			}
+			inject(holderElement.Elem())
 		}
 		if err := rows.Err(); err != nil {
 			return err
@@ -416,6 +371,11 @@ func createMappers(holderElementType reflect.Type, columnTypes []*sql.ColumnType
 	}
 
 	return func(holder interface{}, rows *sql.Rows) error {
+		inject, err := prepareInjector(holder)
+		if err != nil {
+			rows.Close()
+			return err
+		}
 		for rows.Next() {
 			// this call creates initialized struct by traversing throw its structure with reflection
 			//dstValue, err := newStructRecursively(dstType)
@@ -442,10 +402,7 @@ func createMappers(holderElementType reflect.Type, columnTypes []*sql.ColumnType
 				return err
 			}
 
-			if err = putToHolder(holder, holderElement); err != nil {
-				rows.Close()
-				return err
-			}
+			inject(holderElement)
 		}
 		if err := rows.Err(); err != nil {
 			return err
@@ -464,7 +421,7 @@ func holderByFieldIndexPath(holderIndexPath []int) holderSupplier {
 
 func holderSkipColumn(underlyingValue reflect.Value) (skip interface{}) { return &skip }
 
-func putToHolder(holder interface{}, value reflect.Value) error {
+func prepareInjector(holder interface{}) (func(value reflect.Value), error) {
 	dstHolderType := reflect.TypeOf(holder)
 	dstHolderValue := reflect.ValueOf(holder)
 	for {
@@ -473,14 +430,15 @@ func putToHolder(holder interface{}, value reflect.Value) error {
 			dstHolderType = dstHolderType.Elem()
 			dstHolderValue = dstHolderValue.Elem()
 		case reflect.Slice:
-			newSlice := reflect.Append(dstHolderValue, value)
-			dstHolderValue.Set(newSlice)
-			return nil
+			return func(value reflect.Value) {
+				newSlice := reflect.Append(dstHolderValue, value)
+				dstHolderValue.Set(newSlice)
+			}, nil
 
-		//case reflect.Map:
-		//	return errors.New("not implemented: holder for map")
+			//case reflect.Map:
+			//	return errors.New("not implemented: holder for map")
 		default:
-			return errors.New("not implemented: holder for type: " + dstHolderType.Name())
+			return nil, errors.New("not implemented: holder for type: " + dstHolderType.Name())
 		}
 	}
 }

@@ -1,24 +1,23 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"os"
-	"testing"
-
-	"context"
-	"time"
 	"reflect"
+	"testing"
+	"time"
 )
 
 var db *sql.DB
 
 const (
-	port = "32100"
-	user = "user"
+	port     = "32100"
+	user     = "user"
 	password = "password"
-	schema = "dev"
+	schema   = "dev"
 	postgres = "postgres"
-	mysql = "mysql"
+	mysql    = "mysql"
 )
 
 func TestMain(t *testing.M) {
@@ -58,27 +57,17 @@ func closeDbConnection() {
 
 func TestPropagate(t *testing.T) {
 	checks := []struct {
-		scenario string
-		action   func(tx *sql.Tx) func(t *testing.T)
+		scenario  string
+		insert    string
+		retrieval string
+		action    func(rows *sql.Rows) func(t *testing.T)
 	}{
 		{
-			scenario: "retrieve single column and store into a slice of value type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve single column and store into a slice of value type",
+			insert:    "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')",
+			retrieval: "SELECT id FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					var ids []int
 					if err := Propagate(&ids, rows); err != nil {
 						t.Fatal(err)
@@ -89,23 +78,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve single column and store into a slice of reference type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve single column and store into a slice of reference type",
+			insert:    "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')",
+			retrieval: "SELECT id FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					var ids []*int
 					if err := Propagate(&ids, rows); err != nil {
 						t.Fatal(err)
@@ -116,23 +93,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve single column with NULL and store into a slice of reference type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve single column with NULL and store into a slice of reference type",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, '', NULL), (2, '', 'b')",
+			retrieval: "SELECT col2 FROM propagation ORDER BY id ASC ",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, '', NULL), (2, '', 'b')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT col2 FROM propagation ORDER BY id ASC ")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					var col2s []*string
 					if err := Propagate(&col2s, rows); err != nil {
 						t.Fatal(err)
@@ -146,23 +111,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of value struct type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of value struct type",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', NULL), (2, 'b', 'c')",
+			retrieval: "SELECT id, col1, col2 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', NULL), (2, 'b', 'c')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id, col1, col2 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type valStruct struct {
 						Id   int
 						Col1 string
@@ -181,23 +134,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of reference struct type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of reference struct type",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', NULL), (2, 'b', 'c')",
+			retrieval: "SELECT id, col1, col2 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', NULL), (2, 'b', 'c')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id, col1, col2 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type refStruct struct {
 						Id   int
 						Col1 string
@@ -216,24 +157,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of reference struct type with tagged column name",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of reference struct type with tagged column name",
+			insert:    "INSERT INTO propagation(id, col1, col3) VALUES (1, 'a', '" + time.Date(2018, time.July, 18, 13, 59, 59, 0, time.UTC).Format("2006-01-02 15:04:05") + "'), (2, 'b', NULL)",
+			retrieval: "SELECT id, col3 as creation_time FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					row1CreationTimestamp := time.Now().UTC().Round(time.Second)
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col3) VALUES (1, 'a', '"+row1CreationTimestamp.Format("2006-01-02 15:04:05")+"'), (2, 'b', NULL)")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id, col3 as creation_time FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type refStruct struct {
 						PK                int        `db_column:"id"`
 						CreationTimestamp *time.Time `db_column:"creation_time"`
@@ -242,6 +170,7 @@ func TestPropagate(t *testing.T) {
 					if err := Propagate(&refStructs, rows); err != nil {
 						t.Fatal(err)
 					}
+					row1CreationTimestamp := time.Date(2018, time.July, 18, 13, 59, 59, 0, time.UTC)
 					exp1 := &refStruct{PK: 1, CreationTimestamp: &row1CreationTimestamp}
 					if !reflect.DeepEqual(refStructs[0], exp1) {
 						t.Errorf("unexpeted results of propagation: expected %+v, actual %+v", exp1, refStructs[0])
@@ -253,27 +182,15 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of value struct type with embedded field of simple type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of value struct type with embedded field of simple type",
+			insert:    "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')",
+			retrieval: "SELECT id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
 					if driverName() == postgres {
-						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: "+
+						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: " +
 							"sql: Scan error on column index 1: unsupported Scan, storing driver.Value type string into type *main.Col1")
 					}
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'b')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id, col1 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type Col1 []byte
 					type valStruct struct {
 						Id int
@@ -292,27 +209,15 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of value struct type with embedded field of struct value type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of value struct type with embedded field of struct value type",
+			insert:    "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'c')",
+			retrieval: "SELECT id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
 					if driverName() == postgres {
-						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: "+
+						t.Skip("postgres driver doesn't support `type Col1 []byte` types as embedded fields: " +
 							"sql: Scan error on column index 1: unsupported Scan, storing driver.Value type string into type *main.Col1")
 					}
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1) VALUES (1, 'a'), (2, 'c')")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT id, col1 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type Col1 []byte
 					type valStruct struct {
 						Id int
@@ -331,23 +236,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of reference struct type with embedded field of struct reference type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of reference struct type with embedded field of struct reference type",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)",
+			retrieval: "SELECT col2, id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT col2, id, col1 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type Columns struct {
 						Col1 string
 						Col2 *string
@@ -373,23 +266,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of reference struct type with field of struct reference type",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of reference struct type with field of struct reference type",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)",
+			retrieval: "SELECT col2, id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT col2, id, col1 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type columns struct {
 						Col1 string
 						Col2 *string
@@ -415,23 +296,11 @@ func TestPropagate(t *testing.T) {
 				}
 			},
 		}, {
-			scenario: "retrieve multiple columns and store into a slice of reference struct type with deep nesting",
-			action: func(tx *sql.Tx) func(t *testing.T) {
+			scenario:  "retrieve multiple columns and store into a slice of reference struct type with deep nesting",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)",
+			retrieval: "SELECT col2, id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
 				return func(t *testing.T) {
-					initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
-					defer initCancel()
-					_, err := tx.ExecContext(initCtx, "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b'), (2, 'c', NULL)")
-					if err != nil {
-						t.Fatal(err)
-					}
-
-					runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
-					defer runCancel()
-					rows, err := tx.QueryContext(runCtx, "SELECT col2, id, col1 FROM propagation ORDER BY id")
-					if err != nil {
-						t.Fatal(err)
-					}
-
 					type level1 struct {
 						Id int
 					}
@@ -483,11 +352,30 @@ func TestPropagate(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		t.Run(check.scenario, check.action(tx))
+		initCtx, initCancel := context.WithTimeout(context.Background(), time.Second)
+		_, err = tx.ExecContext(initCtx, check.insert)
+		if err != nil {
+			initCancel()
+			t.Fatal(err)
+		}
+
+		runCtx, runCancel := context.WithTimeout(context.Background(), time.Second)
+		rows, err := tx.QueryContext(runCtx, check.retrieval)
+		if err != nil {
+			initCancel()
+			runCancel()
+			t.Fatal(err)
+		}
+
+		t.Run(check.scenario, check.action(rows))
+		initCancel()
+		runCancel()
 		txCancel()
 		txTimeout()
 	}
 }
+
+// StrictColumnTypeCheck
 
 func StringRef(val string) *string {
 	return &val
