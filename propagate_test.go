@@ -331,6 +331,57 @@ func TestPropagate(t *testing.T) {
 					}
 				}
 			},
+		}, {
+			scenario:  "scan to same type but with columns reordered #1",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (1, 'a', 'b')",
+			retrieval: "SELECT col2, id, col1 FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
+				return func(t *testing.T) {
+					var refStructs []*mrefStruct
+					if err := Propagate(&refStructs, rows); err != nil {
+						t.Fatal(err)
+					}
+					act := refStructs[0]
+					exp := &mrefStruct{With: &mlevel3{Col2: StringRef("b"), With: &mlevel2{Col1: "a", With: &mlevel1{Id: 1}}}}
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("unexpeted results of propagation: expected %+v, actual %+v", exp, act)
+					}
+				}
+			},
+		}, {
+			scenario:  "scan to same type but with columns reordered #2",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (2, 'c', NULL)",
+			retrieval: "SELECT col1, col2, id FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
+				return func(t *testing.T) {
+					var refStructs []*mrefStruct
+					if err := Propagate(&refStructs, rows); err != nil {
+						t.Fatal(err)
+					}
+					act := refStructs[0]
+					exp := &mrefStruct{With: &mlevel3{With: &mlevel2{Col1: "c", With: &mlevel1{Id: 2}}}}
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("unexpeted results of propagation: expected %+v, actual %+v", exp, act)
+					}
+				}
+			},
+		}, {
+			scenario:  "scan to same type but with columns reordered #3",
+			insert:    "INSERT INTO propagation(id, col1, col2) VALUES (2, 'c', NULL)",
+			retrieval: "SELECT id FROM propagation ORDER BY id",
+			action: func(rows *sql.Rows) func(t *testing.T) {
+				return func(t *testing.T) {
+					var refStructs []*mrefStruct
+					if err := Propagate(&refStructs, rows); err != nil {
+						t.Fatal(err)
+					}
+					act := refStructs[0]
+					exp := &mrefStruct{With: &mlevel3{With: &mlevel2{With: &mlevel1{Id: 2}}}}
+					if !reflect.DeepEqual(act, exp) {
+						t.Errorf("unexpeted results of propagation: expected %+v, actual %+v", exp, act)
+					}
+				}
+			},
 		},
 		/*
 			- check configuration of flags
@@ -379,4 +430,22 @@ func TestPropagate(t *testing.T) {
 
 func StringRef(val string) *string {
 	return &val
+}
+
+type mlevel1 struct {
+	Id int
+}
+
+type mlevel2 struct {
+	Col1 string
+	With *mlevel1
+}
+
+type mlevel3 struct {
+	Col2 *string
+	With *mlevel2
+}
+
+type mrefStruct struct {
+	With *mlevel3
 }

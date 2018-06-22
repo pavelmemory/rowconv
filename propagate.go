@@ -14,39 +14,38 @@ const (
 	DbColumn = "db_column"
 )
 
-type Mapper func(dst interface{}, rows *sql.Rows) error
-
-var (
-	holderElementTypes    = map[reflect.Type]Mapper{}
-	holderElementTypesMtx sync.RWMutex
-)
-
 var (
 	strictColumnTypeCheck   bool
 	strictColumnAmountCheck bool
+	strictConfigsMtx        sync.RWMutex
+
+	elementScanDefinitions = scanDefinitions{}
+	holderElementTypesMtx  sync.RWMutex
+
+	smallestStructDecompositions = map[reflect.Type]struct{}{
+		reflect.TypeOf(time.Time{}):     {},
+		reflect.TypeOf(time.Location{}): {},
+	}
+	smallestStructDecompositionsMtx sync.RWMutex
+
+	scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 )
 
 // StrictColumnTypeCheck configures mapper to check types of struct fields with types returned by database driver
 // if types are different and 'strict' set to 'true' the error will be produced
 func StrictColumnTypeCheck(strict bool) {
+	strictConfigsMtx.Lock()
 	strictColumnTypeCheck = strict
+	strictConfigsMtx.Unlock()
 }
 
 // StrictColumnAmountCheck configures mapper to check amount of struct fields to be exact to amount of columns returned
 // if amount is different and 'strict' set to 'true' the error will be produced
 func StrictColumnAmountCheck(strict bool) {
+	strictConfigsMtx.Lock()
 	strictColumnAmountCheck = strict
+	strictConfigsMtx.Unlock()
 }
-
-var (
-	smallestStructDecompositions = func() map[reflect.Type]struct{} {
-		return map[reflect.Type]struct{}{
-			reflect.TypeOf(time.Time{}):     {},
-			reflect.TypeOf(time.Location{}): {},
-		}
-	}()
-	smallestStructDecompositionsMtx sync.RWMutex
-)
 
 // SmallestStructDecomposition adds struct to set of structs that not need to be field-initialized,
 // such as time.Time and time.Location
@@ -59,6 +58,10 @@ func SmallestStructDecomposition(t reflect.Type) {
 
 // Propagate converts rows into structs/basic values according to settings and put them into dst
 func Propagate(dst interface{}, rows *sql.Rows) error {
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return err
+	}
 	holderType := reflect.TypeOf(dst)
 	if holderType.Kind() != reflect.Ptr || holderType.Elem().Kind() != reflect.Slice {
 		return errors.New("destination must be a pointer to the slice")
@@ -68,30 +71,22 @@ func Propagate(dst interface{}, rows *sql.Rows) error {
 		return err
 	}
 	holderElementTypesMtx.RLock()
-	mapper := holderElementTypes[holderElementType]
+	scanDef, found := elementScanDefinitions.findScanDefinition(holderElementType, columnTypes)
 	holderElementTypesMtx.RUnlock()
-	if mapper == nil {
+	if !found {
 		holderElementTypesMtx.Lock()
-		mapper = holderElementTypes[holderElementType]
-		if mapper == nil {
-			columnTypes, err := rows.ColumnTypes()
+		scanDef, found = elementScanDefinitions.findScanDefinition(holderElementType, columnTypes)
+		if !found {
+			scanDef, err = elementScanDefinitions.createScanDefinition(holderElementType, columnTypes)
 			if err != nil {
 				holderElementTypesMtx.Unlock()
 				return err
 			}
-			mapper, err = createMappers(holderElementType, columnTypes)
-			if err != nil {
-				holderElementTypesMtx.Unlock()
-				return err
-			}
-			holderElementTypes[holderElementType] = mapper
 			holderElementTypesMtx.Unlock()
 		}
 	}
-	return mapper(dst, rows)
+	return scanDef.mapper(dst, rows)
 }
-
-var scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 
 func isScanSupported(t reflect.Type) bool {
 	return t.Implements(scannerType)
@@ -208,13 +203,13 @@ func getStructProvider(forType reflect.Type) (structProvider, error) {
 	actualValue := reflect.New(actualType).Elem()
 	for i := 0; i < actualValue.NumField(); i++ {
 		actualValueField := actualValue.Field(i)
-	fieldDetermine:
+	LoopDetermineField:
 		for ptrNesting := 0; true; ptrNesting++ {
 			actualValueFieldType := actualValueField.Type()
 			switch actualValueField.Kind() {
 			case reflect.Struct:
 				if isSmallestStructDecomposition(actualValueFieldType) {
-					break fieldDetermine
+					break LoopDetermineField
 				}
 				provider, err := getStructProvider(actualValueFieldType)
 				if err != nil {
@@ -237,12 +232,12 @@ func getStructProvider(forType reflect.Type) (structProvider, error) {
 			case reflect.Ptr:
 				// create pointer before accessing its type information
 				actualValueField = reflect.New(actualValueFieldType.Elem()).Elem()
-				continue fieldDetermine
+				continue LoopDetermineField
 
 			default:
 				// field of base type/reference or alias to base type/reference that not need to be initialized
 			}
-			break fieldDetermine
+			break LoopDetermineField
 		}
 	}
 
@@ -343,15 +338,20 @@ func getHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) (ho
 		return nil, err
 	}
 
+	strictConfigsMtx.RLock()
+	camtChk := strictColumnAmountCheck
+	ctChk := strictColumnTypeCheck
+	strictConfigsMtx.RUnlock()
+
 	for _, columnType := range columnTypes {
 		accessor, found := columnAliasToAccessor[strings.ToLower(columnType.Name())]
 		if found {
-			if strictColumnTypeCheck && columnType.ScanType() != accessor.fieldType {
+			if ctChk && columnType.ScanType() != accessor.fieldType {
 				return nil, fmt.Errorf("value for column/alias: %v can't be stored into the type: %v; required type: %v", columnType.Name(), accessor.fieldType, columnType.ScanType())
 			}
 			holderSuppliers = append(holderSuppliers, holderByFieldIndexPath(accessor.fieldIndex))
 		} else {
-			if strictColumnAmountCheck {
+			if camtChk {
 				return nil, errors.New("no mapping exists for column/alias: " + columnType.Name())
 			}
 			holderSuppliers = append(holderSuppliers, holderSkipColumn)
@@ -360,7 +360,7 @@ func getHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) (ho
 	return
 }
 
-func createMappers(holderElementType reflect.Type, columnTypes []*sql.ColumnType) (Mapper, error) {
+func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnType) (rowsMapper, error) {
 	if isSingleBasicType(holderElementType) {
 		return singleColumnMapper(holderElementType), nil
 	}
@@ -378,7 +378,6 @@ func createMappers(holderElementType reflect.Type, columnTypes []*sql.ColumnType
 		}
 		for rows.Next() {
 			// this call creates initialized struct by traversing throw its structure with reflection
-			//dstValue, err := newStructRecursively(dstType)
 			provider, err := getStructProviderSync(holderElementType)
 			if err != nil {
 				rows.Close()
@@ -441,4 +440,43 @@ func prepareInjector(holder interface{}) (func(value reflect.Value), error) {
 			return nil, errors.New("not implemented: holder for type: " + dstHolderType.Name())
 		}
 	}
+}
+
+type rowsMapper func(dst interface{}, rows *sql.Rows) error
+
+type scanDefinition struct {
+	columnTypes []*sql.ColumnType
+	mapper      rowsMapper
+}
+
+type scanDefinitions map[reflect.Type][]scanDefinition
+
+func (sd scanDefinitions) findScanDefinition(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, bool) {
+	scanDefs, found := sd[elementType]
+	if !found {
+		return scanDefinition{}, false
+	}
+LoopScanDef:
+	for _, scanDef := range scanDefs {
+		if len(scanDef.columnTypes) != len(columnTypes) {
+			continue
+		}
+		for i := 0; i < len(scanDef.columnTypes); i++ {
+			if *scanDef.columnTypes[i] != *columnTypes[i] {
+				continue LoopScanDef
+			}
+		}
+		return scanDef, true
+	}
+	return scanDefinition{}, false
+}
+
+func (sd scanDefinitions) createScanDefinition(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, error) {
+	mapper, err := createRowsMapper(elementType, columnTypes)
+	if err != nil {
+		return scanDefinition{}, err
+	}
+	scanDef := scanDefinition{mapper: mapper, columnTypes: columnTypes}
+	sd[elementType] = append(sd[elementType], scanDef)
+	return scanDef, nil
 }
