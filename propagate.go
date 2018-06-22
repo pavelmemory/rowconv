@@ -19,8 +19,8 @@ var (
 	strictColumnAmountCheck bool
 	strictConfigsMtx        sync.RWMutex
 
-	elementScanDefinitions = scanDefinitions{}
-	holderElementTypesMtx  sync.RWMutex
+	scanDefinitionsMng = &scanDefinitionsManager{byType: map[reflect.Type][]scanDefinition{}}
+	structProviderMng = &structProvideManager{byType: map[reflect.Type]structProvider{}}
 
 	smallestStructDecompositions = map[reflect.Type]struct{}{
 		reflect.TypeOf(time.Time{}):     {},
@@ -70,20 +70,9 @@ func Propagate(dst interface{}, rows *sql.Rows) error {
 	if err != nil {
 		return err
 	}
-	holderElementTypesMtx.RLock()
-	scanDef, found := elementScanDefinitions.findScanDefinition(holderElementType, columnTypes)
-	holderElementTypesMtx.RUnlock()
-	if !found {
-		holderElementTypesMtx.Lock()
-		scanDef, found = elementScanDefinitions.findScanDefinition(holderElementType, columnTypes)
-		if !found {
-			scanDef, err = elementScanDefinitions.createScanDefinition(holderElementType, columnTypes)
-			if err != nil {
-				holderElementTypesMtx.Unlock()
-				return err
-			}
-			holderElementTypesMtx.Unlock()
-		}
+	scanDef, err := scanDefinitionsMng.getOrCreateSync(holderElementType, columnTypes)
+	if err != nil {
+		return err
 	}
 	return scanDef.mapper(dst, rows)
 }
@@ -126,7 +115,7 @@ type fieldAccessor struct {
 	fieldIndex []int
 }
 
-func getFieldAccessorsRecursively(columnAliasToAccessor map[string]fieldAccessor, folding []int, inspectionType reflect.Type) error {
+func createFieldsAccessorsRecursively(columnAliasToAccessor map[string]fieldAccessor, folding []int, inspectionType reflect.Type) error {
 	for {
 		switch inspectionType.Kind() {
 		case reflect.Ptr:
@@ -139,7 +128,7 @@ func getFieldAccessorsRecursively(columnAliasToAccessor map[string]fieldAccessor
 				fieldKind := field.Type.Kind()
 				if fieldKind == reflect.Struct || // is struct or pointer to struct
 					fieldKind == reflect.Ptr && field.Type.Elem().Kind() == reflect.Struct {
-					if err := getFieldAccessorsRecursively(columnAliasToAccessor, append(folding, i), field.Type); err != nil {
+					if err := createFieldsAccessorsRecursively(columnAliasToAccessor, append(folding, i), field.Type); err != nil {
 						return err
 					}
 				}
@@ -159,9 +148,9 @@ func getFieldAccessorsRecursively(columnAliasToAccessor map[string]fieldAccessor
 	return errors.New("not supported type: " + inspectionType.String())
 }
 
-func getFieldAccessors(dstType reflect.Type) (map[string]fieldAccessor, error) {
+func createFieldsAccessors(dstType reflect.Type) (map[string]fieldAccessor, error) {
 	columnAliasToAccessor := map[string]fieldAccessor{}
-	if err := getFieldAccessorsRecursively(columnAliasToAccessor, nil, dstType); err != nil {
+	if err := createFieldsAccessorsRecursively(columnAliasToAccessor, nil, dstType); err != nil {
 		return nil, err
 	}
 	return columnAliasToAccessor, nil
@@ -169,27 +158,27 @@ func getFieldAccessors(dstType reflect.Type) (map[string]fieldAccessor, error) {
 
 type structProvider func() (reflect.Value, error)
 
-var (
-	structProviders    = map[reflect.Type]structProvider{}
-	structProvidersMtx sync.RWMutex
-)
+type structProvideManager struct {
+	byType map[reflect.Type]structProvider
+	sync.RWMutex
+}
 
-func getStructProviderSync(forType reflect.Type) (provider structProvider, err error) {
-	structProvidersMtx.RLock()
-	provider, found := structProviders[forType]
+func (tsp *structProvideManager) getOrCreateSync(forType reflect.Type) (provider structProvider, err error) {
+	tsp.RLock()
+	provider, found := tsp.byType[forType]
 	if found {
-		structProvidersMtx.RUnlock()
+		tsp.RUnlock()
 		return
 	}
-	structProvidersMtx.RUnlock()
-	structProvidersMtx.Lock()
-	provider, err = getStructProvider(forType)
-	structProvidersMtx.Unlock()
+	tsp.RUnlock()
+	tsp.Lock()
+	provider, err = tsp.getOrCreate(forType)
+	tsp.Unlock()
 	return
 }
 
-func getStructProvider(forType reflect.Type) (structProvider, error) {
-	provider, found := structProviders[forType]
+func (tsp *structProvideManager) getOrCreate(forType reflect.Type) (structProvider, error) {
+	provider, found := tsp.byType[forType]
 	if found {
 		return provider, nil
 	}
@@ -211,7 +200,7 @@ func getStructProvider(forType reflect.Type) (structProvider, error) {
 				if isSmallestStructDecomposition(actualValueFieldType) {
 					break LoopDetermineField
 				}
-				provider, err := getStructProvider(actualValueFieldType)
+				provider, err := tsp.getOrCreate(actualValueFieldType)
 				if err != nil {
 					return nil, err
 				}
@@ -253,7 +242,7 @@ func getStructProvider(forType reflect.Type) (structProvider, error) {
 		}
 		return holderValue, nil
 	}
-	structProviders[forType] = provider
+	tsp.byType[forType] = provider
 	return provider, nil
 }
 
@@ -332,8 +321,8 @@ func singleColumnMapper(forType reflect.Type) func(dst interface{}, rows *sql.Ro
 	}
 }
 
-func getHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) (holderSuppliers []holderSupplier, err error) {
-	columnAliasToAccessor, err := getFieldAccessors(dstType)
+func createHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) (holderSuppliers []holderSupplier, err error) {
+	columnAliasToAccessor, err := createFieldsAccessors(dstType)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +354,7 @@ func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnT
 		return singleColumnMapper(holderElementType), nil
 	}
 
-	holderSuppliers, err := getHolderSuppliers(holderElementType, columnTypes)
+	holderSuppliers, err := createHolderSuppliers(holderElementType, columnTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +367,7 @@ func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnT
 		}
 		for rows.Next() {
 			// this call creates initialized struct by traversing throw its structure with reflection
-			provider, err := getStructProviderSync(holderElementType)
+			provider, err := structProviderMng.getOrCreateSync(holderElementType)
 			if err != nil {
 				rows.Close()
 				return err
@@ -449,10 +438,29 @@ type scanDefinition struct {
 	mapper      rowsMapper
 }
 
-type scanDefinitions map[reflect.Type][]scanDefinition
+type scanDefinitionsManager struct {
+	byType map[reflect.Type][]scanDefinition
+	sync.RWMutex
+}
 
-func (sd scanDefinitions) findScanDefinition(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, bool) {
-	scanDefs, found := sd[elementType]
+func (sdm *scanDefinitionsManager) getOrCreateSync(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDef scanDefinition, err error) {
+	var found bool
+	sdm.RLock()
+	scanDef, found = sdm.find(elementType, columnTypes)
+	sdm.RUnlock()
+	if !found {
+		sdm.Lock()
+		scanDef, found = sdm.find(elementType, columnTypes)
+		if !found {
+			scanDef, err = sdm.create(elementType, columnTypes)
+			sdm.Unlock()
+		}
+	}
+	return
+}
+
+func (sdm *scanDefinitionsManager) find(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, bool) {
+	scanDefs, found := sdm.byType[elementType]
 	if !found {
 		return scanDefinition{}, false
 	}
@@ -471,12 +479,12 @@ LoopScanDef:
 	return scanDefinition{}, false
 }
 
-func (sd scanDefinitions) createScanDefinition(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, error) {
+func (sdm *scanDefinitionsManager) create(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, error) {
 	mapper, err := createRowsMapper(elementType, columnTypes)
 	if err != nil {
 		return scanDefinition{}, err
 	}
 	scanDef := scanDefinition{mapper: mapper, columnTypes: columnTypes}
-	sd[elementType] = append(sd[elementType], scanDef)
+	sdm.byType[elementType] = append(sdm.byType[elementType], scanDef)
 	return scanDef, nil
 }
