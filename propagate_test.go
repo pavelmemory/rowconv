@@ -16,8 +16,6 @@ const (
 	user     = "user"
 	password = "password"
 	schema   = "dev"
-	postgres = "postgres"
-	mysql    = "mysql"
 )
 
 func TestMain(t *testing.M) {
@@ -41,6 +39,7 @@ func initDbConnection() {
 	if err != nil {
 		panic(err)
 	}
+
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), time.Second)
 	defer pingCancel()
 	err = db.PingContext(pingCtx)
@@ -391,15 +390,16 @@ func TestPropagate(t *testing.T) {
 	}
 
 	for _, check := range checks {
-		txCtx, txCancel := context.WithCancel(context.Background())
-		txCtx, txTimeout := context.WithTimeout(txCtx, time.Second)
+		txCtx, txTimeout := context.WithTimeout(context.Background(), 5*time.Second)
 		tx, err := db.BeginTx(txCtx, nil)
 		if err != nil {
+			txTimeout()
 			t.Fatal(err)
 		}
 
 		_, err = tx.ExecContext(txCtx, ddlCreateTestTempTable())
 		if err != nil {
+			txTimeout()
 			t.Fatal(err)
 		}
 
@@ -407,6 +407,7 @@ func TestPropagate(t *testing.T) {
 		_, err = tx.ExecContext(initCtx, check.insert)
 		if err != nil {
 			initCancel()
+			txTimeout()
 			t.Fatal(err)
 		}
 
@@ -415,13 +416,13 @@ func TestPropagate(t *testing.T) {
 		if err != nil {
 			initCancel()
 			runCancel()
+			txTimeout()
 			t.Fatal(err)
 		}
 
 		t.Run(check.scenario, check.action(rows))
 		initCancel()
 		runCancel()
-		txCancel()
 		txTimeout()
 	}
 }

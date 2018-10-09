@@ -6,12 +6,16 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const (
+	postgres = "postgres"
+)
+
 func driverName() string {
 	return postgres
 }
 
 func dataSourceURL() string {
-	return postgres+"://"+user+":"+password+"@localhost:"+port+"/"+schema+"?sslmode=disable"
+	return postgres + "://" + user + ":" + password + "@192.168.99.100:" + port + "/" + schema + "?sslmode=disable"
 }
 
 func ddlCreateTestTempTable() string {

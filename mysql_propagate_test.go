@@ -6,12 +6,16 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+const (
+	mysql = "mysql"
+)
+
 func driverName() string {
 	return mysql
 }
 
 func dataSourceURL() string {
-	return user+":"+password+"@tcp(127.0.0.1:"+port+")/"+schema+"?parseTime=true"
+	return user + ":" + password + "@tcp(127.0.0.1:" + port + ")/" + schema + "?parseTime=true"
 }
 
 func ddlCreateTestTempTable() string {

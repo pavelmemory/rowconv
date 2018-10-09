@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,12 +16,11 @@ const (
 )
 
 var (
-	strictColumnTypeCheck   bool
-	strictColumnAmountCheck bool
-	strictConfigsMtx        sync.RWMutex
+	columnTypeCheck   atomic.Value
+	columnAmountCheck atomic.Value
 
-	scanDefinitionsMng = &scanDefinitionsManager{byType: map[reflect.Type][]scanDefinition{}}
-	structProviderMng = &structProvideManager{byType: map[reflect.Type]structProvider{}}
+	scanDefinitionsMgr = &scanDefinitionsManager{byType: map[reflect.Type][]scanDefinition{}}
+	structProviderMgr  = &structProvideManager{byType: map[reflect.Type]structProvider{}}
 
 	smallestStructDecompositions = map[reflect.Type]struct{}{
 		reflect.TypeOf(time.Time{}):     {},
@@ -31,20 +31,29 @@ var (
 	scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 )
 
+func init() {
+	columnTypeCheck.Store(false)
+	columnAmountCheck.Store(false)
+}
+
 // StrictColumnTypeCheck configures mapper to check types of struct fields with types returned by database driver
 // if types are different and 'strict' set to 'true' the error will be produced
 func StrictColumnTypeCheck(strict bool) {
-	strictConfigsMtx.Lock()
-	strictColumnTypeCheck = strict
-	strictConfigsMtx.Unlock()
+	columnTypeCheck.Store(strict)
+}
+
+func strictColumnTypeCheck() bool {
+	return columnTypeCheck.Load().(bool)
 }
 
 // StrictColumnAmountCheck configures mapper to check amount of struct fields to be exact to amount of columns returned
 // if amount is different and 'strict' set to 'true' the error will be produced
 func StrictColumnAmountCheck(strict bool) {
-	strictConfigsMtx.Lock()
-	strictColumnAmountCheck = strict
-	strictConfigsMtx.Unlock()
+	columnAmountCheck.Store(strict)
+}
+
+func strictColumnAmountCheck() bool {
+	return columnAmountCheck.Load().(bool)
 }
 
 // SmallestStructDecomposition adds struct to set of structs that not need to be field-initialized,
@@ -62,18 +71,23 @@ func Propagate(dst interface{}, rows *sql.Rows) error {
 	if err != nil {
 		return err
 	}
+
 	holderType := reflect.TypeOf(dst)
-	if holderType.Kind() != reflect.Ptr || holderType.Elem().Kind() != reflect.Slice {
+	holderElemType := holderType.Elem()
+	if holderType.Kind() != reflect.Ptr || holderElemType.Kind() != reflect.Slice {
 		return errors.New("destination must be a pointer to the slice")
 	}
-	holderElementType, err := elementType(holderType.Elem())
+
+	holderElementType, err := elementType(holderElemType)
 	if err != nil {
 		return err
 	}
-	scanDef, err := scanDefinitionsMng.getOrCreateSync(holderElementType, columnTypes)
+
+	scanDef, err := scanDefinitionsMgr.getOrCreateSync(holderElementType, columnTypes)
 	if err != nil {
 		return err
 	}
+
 	return scanDef.mapper(dst, rows)
 }
 
@@ -327,10 +341,8 @@ func createHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) 
 		return nil, err
 	}
 
-	strictConfigsMtx.RLock()
-	camtChk := strictColumnAmountCheck
-	ctChk := strictColumnTypeCheck
-	strictConfigsMtx.RUnlock()
+	camtChk := strictColumnAmountCheck()
+	ctChk := strictColumnTypeCheck()
 
 	for _, columnType := range columnTypes {
 		accessor, found := columnAliasToAccessor[strings.ToLower(columnType.Name())]
@@ -359,43 +371,53 @@ func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnT
 		return nil, err
 	}
 
-	return func(holder interface{}, rows *sql.Rows) error {
+	return func(holder interface{}, rows *sql.Rows) (err error) {
+		defer func() {
+			cErr := rows.Close()
+			if err == nil {
+				err = cErr
+			}
+		}()
+
 		inject, err := prepareInjector(holder)
 		if err != nil {
-			rows.Close()
-			return err
+			return
 		}
+
 		for rows.Next() {
 			// this call creates initialized struct by traversing throw its structure with reflection
-			provider, err := structProviderMng.getOrCreateSync(holderElementType)
+			var provider structProvider
+			provider, err = structProviderMgr.getOrCreateSync(holderElementType)
 			if err != nil {
-				rows.Close()
-				return err
-			}
-			holderElement, err := provider()
-			if err != nil {
-				rows.Close()
-				return err
+				return
 			}
 
-			underlyingValue, _, err := unwrapPtrStructValue(holderElement)
+			var holderElement reflect.Value
+			holderElement, err = provider()
 			if err != nil {
-				return err
+				return
 			}
+
+			var underlyingValue reflect.Value
+			underlyingValue, _, err = unwrapPtrStructValue(holderElement)
+			if err != nil {
+				return
+			}
+
 			holderElementFields := make([]interface{}, len(holderSuppliers))
 			for i, holderSupplier := range holderSuppliers {
 				holderElementFields[i] = holderSupplier(underlyingValue)
 			}
+
 			if err = rows.Scan(holderElementFields...); err != nil {
-				return err
+				return
 			}
 
 			inject(holderElement)
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		return rows.Close()
+
+		err = rows.Err()
+		return
 	}, nil
 }
 
@@ -448,13 +470,17 @@ func (sdm *scanDefinitionsManager) getOrCreateSync(elementType reflect.Type, col
 	sdm.RLock()
 	scanDef, found = sdm.find(elementType, columnTypes)
 	sdm.RUnlock()
+
 	if !found {
 		sdm.Lock()
-		scanDef, found = sdm.find(elementType, columnTypes)
-		if !found {
-			scanDef, err = sdm.create(elementType, columnTypes)
+
+		if scanDef, found = sdm.find(elementType, columnTypes); found {
 			sdm.Unlock()
+			return
 		}
+
+		scanDef, err = sdm.create(elementType, columnTypes)
+		sdm.Unlock()
 	}
 	return
 }
@@ -464,18 +490,22 @@ func (sdm *scanDefinitionsManager) find(elementType reflect.Type, columnTypes []
 	if !found {
 		return scanDefinition{}, false
 	}
+
 LoopScanDef:
 	for _, scanDef := range scanDefs {
 		if len(scanDef.columnTypes) != len(columnTypes) {
 			continue
 		}
+
 		for i := 0; i < len(scanDef.columnTypes); i++ {
 			if *scanDef.columnTypes[i] != *columnTypes[i] {
 				continue LoopScanDef
 			}
 		}
+
 		return scanDef, true
 	}
+
 	return scanDefinition{}, false
 }
 
@@ -484,6 +514,7 @@ func (sdm *scanDefinitionsManager) create(elementType reflect.Type, columnTypes 
 	if err != nil {
 		return scanDefinition{}, err
 	}
+
 	scanDef := scanDefinition{mapper: mapper, columnTypes: columnTypes}
 	sdm.byType[elementType] = append(sdm.byType[elementType], scanDef)
 	return scanDef, nil
