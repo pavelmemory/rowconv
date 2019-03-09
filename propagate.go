@@ -73,9 +73,13 @@ func Propagate(dst interface{}, rows *sql.Rows) error {
 	}
 
 	holderType := reflect.TypeOf(dst)
+	if holderType.Kind() != reflect.Ptr {
+		return errors.New("pointer to the slice is expected, received: " + holderType.String())
+	}
+
 	holderElemType := holderType.Elem()
-	if holderType.Kind() != reflect.Ptr || holderElemType.Kind() != reflect.Slice {
-		return errors.New("destination must be a pointer to the slice")
+	if holderElemType.Kind() != reflect.Slice {
+		return errors.New("pointer to the slice is expected, received: " + holderType.String())
 	}
 
 	holderElementType, err := elementType(holderElemType)
@@ -109,14 +113,12 @@ func elementType(dstType reflect.Type) (reflect.Type, error) {
 	inspection := dstType
 	for {
 		switch inspection.Kind() {
-		case reflect.Map:
-			inspection = inspection.Elem()
 		case reflect.Slice:
 			if inspection.Elem().Kind() == reflect.Uint8 {
 				return inspection, nil
 			}
 			inspection = inspection.Elem()
-		case reflect.Chan, reflect.Func, reflect.Invalid, reflect.Interface, reflect.UnsafePointer, reflect.Array:
+		case reflect.Map, reflect.Chan, reflect.Func, reflect.Invalid, reflect.Interface, reflect.UnsafePointer, reflect.Array:
 			return nil, errors.New("unsupported type: " + dstType.String())
 		default:
 			return inspection, nil
@@ -361,47 +363,32 @@ func createHolderSuppliers(dstType reflect.Type, columnTypes []*sql.ColumnType) 
 	return
 }
 
-func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnType) (rowsMapper, error) {
-	if isSingleBasicType(holderElementType) {
-		return singleColumnMapper(holderElementType), nil
-	}
-
+func multiColumnMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnType) (rowsMapper, error) {
 	holderSuppliers, err := createHolderSuppliers(holderElementType, columnTypes)
 	if err != nil {
 		return nil, err
 	}
 
-	return func(holder interface{}, rows *sql.Rows) (err error) {
-		defer func() {
-			cErr := rows.Close()
-			if err == nil {
-				err = cErr
-			}
-		}()
+	provider, err := structProviderMgr.getOrCreateSync(holderElementType)
+	if err != nil {
+		return nil, err
+	}
 
+	return func(holder interface{}, rows *sql.Rows) error {
 		inject, err := prepareInjector(holder)
 		if err != nil {
-			return
+			return err
 		}
 
 		for rows.Next() {
-			// this call creates initialized struct by traversing throw its structure with reflection
-			var provider structProvider
-			provider, err = structProviderMgr.getOrCreateSync(holderElementType)
+			holderElement, err := provider()
 			if err != nil {
-				return
+				return err
 			}
 
-			var holderElement reflect.Value
-			holderElement, err = provider()
+			underlyingValue, _, err := unwrapPtrStructValue(holderElement)
 			if err != nil {
-				return
-			}
-
-			var underlyingValue reflect.Value
-			underlyingValue, _, err = unwrapPtrStructValue(holderElement)
-			if err != nil {
-				return
+				return err
 			}
 
 			holderElementFields := make([]interface{}, len(holderSuppliers))
@@ -409,16 +396,21 @@ func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnT
 				holderElementFields[i] = holderSupplier(underlyingValue)
 			}
 
-			if err = rows.Scan(holderElementFields...); err != nil {
-				return
+			if err := rows.Scan(holderElementFields...); err != nil {
+				return err
 			}
 
 			inject(holderElement)
 		}
-
-		err = rows.Err()
-		return
+		return rows.Err()
 	}, nil
+}
+
+func createRowsMapper(holderElementType reflect.Type, columnTypes []*sql.ColumnType) (rowsMapper, error) {
+	if isSingleBasicType(holderElementType) {
+		return singleColumnMapper(holderElementType), nil
+	}
+	return multiColumnMapper(holderElementType, columnTypes)
 }
 
 type holderSupplier func(underlyingValue reflect.Value) interface{}
