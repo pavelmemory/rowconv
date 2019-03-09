@@ -1,4 +1,4 @@
-package main
+package rowconv
 
 import (
 	"database/sql"
@@ -95,17 +95,14 @@ func Propagate(dst interface{}, rows *sql.Rows) error {
 	return scanDef.mapper(dst, rows)
 }
 
-func isScanSupported(t reflect.Type) bool {
-	return t.Implements(scannerType)
-}
-
 func isSmallestStructDecomposition(t reflect.Type) bool {
+	if t.Implements(scannerType) {
+		return true
+	}
+
 	smallestStructDecompositionsMtx.RLock()
 	_, smallest := smallestStructDecompositions[t]
 	smallestStructDecompositionsMtx.RUnlock()
-	if !smallest {
-		smallest = isScanSupported(t)
-	}
 	return smallest
 }
 
@@ -216,6 +213,7 @@ func (tsp *structProvideManager) getOrCreate(forType reflect.Type) (structProvid
 				if isSmallestStructDecomposition(actualValueFieldType) {
 					break LoopDetermineField
 				}
+
 				provider, err := tsp.getOrCreate(actualValueFieldType)
 				if err != nil {
 					return nil, err

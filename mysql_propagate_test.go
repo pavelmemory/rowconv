@@ -1,6 +1,6 @@
 // +build mysql
 
-package main
+package rowconv
 
 import (
 	_ "github.com/go-sql-driver/mysql"

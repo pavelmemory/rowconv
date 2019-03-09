@@ -1,6 +1,6 @@
 // +build postgres
 
-package main
+package rowconv
 
 import (
 	_ "github.com/lib/pq"
@@ -15,7 +15,7 @@ func driverName() string {
 }
 
 func dataSourceURL() string {
-	return postgres + "://" + user + ":" + password + "@192.168.99.100:" + port + "/" + schema + "?sslmode=disable"
+	return postgres + "://" + user + ":" + password + "@127.0.0.1:" + port + "/" + schema + "?sslmode=disable"
 }
 
 func ddlCreateTestTempTable() string {

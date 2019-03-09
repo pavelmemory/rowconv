@@ -1,4 +1,4 @@
-package main
+package rowconv
 
 import (
 	"context"
@@ -385,7 +385,6 @@ func TestPropagate(t *testing.T) {
 		/*
 			- check configuration of flags
 			- check error cases
-			- extend with map[A]B receiver
 		*/
 	}
 
