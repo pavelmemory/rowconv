@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DbColumn = "db_column"
+	dbColumn = "db_column"
 )
 
 var (
@@ -22,11 +22,15 @@ var (
 	scanDefinitionsMgr = &scanDefinitionsManager{byType: map[reflect.Type][]scanDefinition{}}
 	structProviderMgr  = &structProvideManager{byType: map[reflect.Type]structProvider{}}
 
-	smallestStructDecompositions = map[reflect.Type]struct{}{
-		reflect.TypeOf(time.Time{}):     {},
-		reflect.TypeOf(time.Location{}): {},
+	smallestStructDecompositions = struct {
+		set map[reflect.Type]struct{}
+		sync.RWMutex
+	}{
+		set: map[reflect.Type]struct{}{
+			reflect.TypeOf(time.Time{}):     {},
+			reflect.TypeOf(time.Location{}): {},
+		},
 	}
-	smallestStructDecompositionsMtx sync.RWMutex
 
 	scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
 )
@@ -60,9 +64,9 @@ func strictColumnAmountCheck() bool {
 // such as time.Time and time.Location
 // `time.Time` and `time.Location` are added by default
 func SmallestStructDecomposition(t reflect.Type) {
-	smallestStructDecompositionsMtx.Lock()
-	smallestStructDecompositions[t] = struct{}{}
-	smallestStructDecompositionsMtx.Unlock()
+	smallestStructDecompositions.Lock()
+	smallestStructDecompositions.set[t] = struct{}{}
+	smallestStructDecompositions.Unlock()
 }
 
 // Propagate converts rows into structs/basic values according to settings and put them into dst
@@ -100,9 +104,9 @@ func isSmallestStructDecomposition(t reflect.Type) bool {
 		return true
 	}
 
-	smallestStructDecompositionsMtx.RLock()
-	_, smallest := smallestStructDecompositions[t]
-	smallestStructDecompositionsMtx.RUnlock()
+	smallestStructDecompositions.RLock()
+	_, smallest := smallestStructDecompositions.set[t]
+	smallestStructDecompositions.RUnlock()
 	return smallest
 }
 
@@ -146,7 +150,7 @@ func createFieldsAccessorsRecursively(columnAliasToAccessor map[string]fieldAcce
 					}
 				}
 
-				columnAlias, found := field.Tag.Lookup(DbColumn)
+				columnAlias, found := field.Tag.Lookup(dbColumn)
 				if !found {
 					columnAlias = strings.ToLower(field.Name)
 				}
@@ -158,7 +162,6 @@ func createFieldsAccessorsRecursively(columnAliasToAccessor map[string]fieldAcce
 			return nil
 		}
 	}
-	return errors.New("not supported type: " + inspectionType.String())
 }
 
 func createFieldsAccessors(dstType reflect.Type) (map[string]fieldAccessor, error) {
@@ -301,7 +304,8 @@ func isSingleBasicType(dstType reflect.Type) bool {
 			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 			reflect.String,
-			reflect.Float32, reflect.Float64:
+			reflect.Float32, reflect.Float64,
+			reflect.Complex64, reflect.Complex128:
 			return true
 		case reflect.Slice:
 			return dstType.Elem().Kind() == reflect.Uint8
@@ -455,24 +459,27 @@ type scanDefinitionsManager struct {
 	sync.RWMutex
 }
 
-func (sdm *scanDefinitionsManager) getOrCreateSync(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDef scanDefinition, err error) {
+func (sdm *scanDefinitionsManager) getOrCreateSync(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, error) {
+	var scanDef scanDefinition
 	var found bool
+
 	sdm.RLock()
 	scanDef, found = sdm.find(elementType, columnTypes)
 	sdm.RUnlock()
 
-	if !found {
-		sdm.Lock()
-
-		if scanDef, found = sdm.find(elementType, columnTypes); found {
-			sdm.Unlock()
-			return
-		}
-
-		scanDef, err = sdm.create(elementType, columnTypes)
-		sdm.Unlock()
+	if found {
+		return scanDef, nil
 	}
-	return
+
+	sdm.Lock()
+	if scanDef, found = sdm.find(elementType, columnTypes); found {
+		sdm.Unlock()
+		return scanDef, nil
+	}
+
+	scanDef, err := sdm.create(elementType, columnTypes)
+	sdm.Unlock()
+	return scanDef, err
 }
 
 func (sdm *scanDefinitionsManager) find(elementType reflect.Type, columnTypes []*sql.ColumnType) (scanDefinition, bool) {
